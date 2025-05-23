@@ -14,23 +14,24 @@ from database import (
     obter_resultados_mensais
 )
 
-def processar_operacoes(operacoes: List[OperacaoCreate]) -> None:
+def processar_operacoes(operacoes: List[OperacaoCreate], usuario_id: int) -> None:
     """
     Processa uma lista de operações, salvando-as no banco de dados
-    e atualizando a carteira atual.
+    e atualizando a carteira atual para um usuário específico.
     
     Args:
         operacoes: Lista de operações a serem processadas.
+        usuario_id: ID do usuário.
     """
     # Salva as operações no banco de dados
-    for op in operacoes:
-        inserir_operacao(op.dict())
+    for op in operacoes: # operacoes is List[OperacaoCreate]
+        inserir_operacao(op.model_dump(), usuario_id=usuario_id)
     
     # Recalcula a carteira atual
-    recalcular_carteira()
+    recalcular_carteira(usuario_id=usuario_id)
     
     # Recalcula os resultados mensais
-    recalcular_resultados()
+    recalcular_resultados(usuario_id=usuario_id)
 
 def _eh_day_trade(operacoes_dia: List[Dict[str, Any]], ticker: str) -> bool:
     """
@@ -51,12 +52,13 @@ def _eh_day_trade(operacoes_dia: List[Dict[str, Any]], ticker: str) -> bool:
     # Se houve compra e venda do mesmo ticker no mesmo dia, é day trade
     return compras > 0 and vendas > 0
 
-def _calcular_resultado_dia(operacoes_dia: List[Dict[str, Any]]) -> Tuple[Dict[str, float], Dict[str, float]]:
+def _calcular_resultado_dia(operacoes_dia: List[Dict[str, Any]], usuario_id: int) -> Tuple[Dict[str, float], Dict[str, float]]:
     """
-    Calcula o resultado de swing trade e day trade para um dia.
+    Calcula o resultado de swing trade e day trade para um dia para um usuário específico.
     
     Args:
         operacoes_dia: Lista de operações do dia.
+        usuario_id: ID do usuário.
         
     Returns:
         Tuple[Dict[str, float], Dict[str, float]]: Resultados de swing trade e day trade.
@@ -107,7 +109,7 @@ def _calcular_resultado_dia(operacoes_dia: List[Dict[str, Any]]) -> Tuple[Dict[s
                 # Para calcular o custo, precisamos do preço médio da carteira
                 # Isso é uma simplificação, na prática precisaríamos rastrear o preço médio
                 # de cada ticker ao longo do tempo
-                carteira = obter_carteira_atual()
+                carteira = obter_carteira_atual(usuario_id=usuario_id)
                 ticker_info = next((item for item in carteira if item["ticker"] == ticker), None)
                 
                 if ticker_info:
@@ -124,32 +126,41 @@ def _calcular_resultado_dia(operacoes_dia: List[Dict[str, Any]]) -> Tuple[Dict[s
     
     return resultado_swing, resultado_day
 
-def calcular_resultados_mensais() -> List[Dict[str, Any]]:
+def calcular_resultados_mensais(usuario_id: int) -> List[Dict[str, Any]]:
     """
-    Obtém os resultados mensais calculados.
-    
+    Obtém os resultados mensais calculados para um usuário específico.
+
+    Args:
+        usuario_id: ID do usuário.
+        
     Returns:
         List[Dict[str, Any]]: Lista de resultados mensais.
     """
-    return obter_resultados_mensais()
+    return obter_resultados_mensais(usuario_id=usuario_id)
 
-def calcular_carteira_atual() -> List[Dict[str, Any]]:
+def calcular_carteira_atual(usuario_id: int) -> List[Dict[str, Any]]:
     """
-    Obtém a carteira atual de ações.
-    
+    Obtém a carteira atual de ações para um usuário específico.
+
+    Args:
+        usuario_id: ID do usuário.
+        
     Returns:
         List[Dict[str, Any]]: Lista de itens da carteira.
     """
-    return obter_carteira_atual()
+    return obter_carteira_atual(usuario_id=usuario_id)
 
-def gerar_darfs() -> List[Dict[str, Any]]:
+def gerar_darfs(usuario_id: int) -> List[Dict[str, Any]]:
     """
-    Gera a lista de DARFs a partir dos resultados mensais.
-    
+    Gera a lista de DARFs a partir dos resultados mensais para um usuário específico.
+
+    Args:
+        usuario_id: ID do usuário.
+        
     Returns:
         List[Dict[str, Any]]: Lista de DARFs.
     """
-    resultados = obter_resultados_mensais()
+    resultados = obter_resultados_mensais(usuario_id=usuario_id)
     
     darfs = []
     for resultado in resultados:
@@ -165,44 +176,49 @@ def gerar_darfs() -> List[Dict[str, Any]]:
 
 # Novas funções para as funcionalidades adicionais
 
-def inserir_operacao_manual(operacao: OperacaoCreate) -> None:
+def inserir_operacao_manual(operacao: OperacaoCreate, usuario_id: int) -> None:
     """
-    Insere uma operação manualmente e recalcula a carteira e os resultados.
+    Insere uma operação manualmente e recalcula a carteira e os resultados para um usuário específico.
     
     Args:
         operacao: Dados da operação a ser inserida.
+        usuario_id: ID do usuário.
     """
     # Insere a operação no banco de dados
-    inserir_operacao(operacao.dict())
+    inserir_operacao(operacao.model_dump(), usuario_id=usuario_id)
     
     # Recalcula a carteira e os resultados
-    recalcular_carteira()
-    recalcular_resultados()
+    recalcular_carteira(usuario_id=usuario_id)
+    recalcular_resultados(usuario_id=usuario_id)
 
-def atualizar_item_carteira(dados: AtualizacaoCarteira) -> None:
+def atualizar_item_carteira(dados: AtualizacaoCarteira, usuario_id: int) -> None:
     """
-    Atualiza um item da carteira manualmente.
+    Atualiza um item da carteira manualmente para um usuário específico.
     
     Args:
         dados: Novos dados do item da carteira (ticker, quantidade e preço médio).
+        usuario_id: ID do usuário.
     """
     # Atualiza o item na carteira
-    atualizar_carteira(dados.ticker, dados.quantidade, dados.preco_medio)
+    atualizar_carteira(dados.ticker, dados.quantidade, dados.preco_medio, usuario_id=usuario_id)
 
 
             
             
 
-def calcular_operacoes_fechadas() -> List[Dict[str, Any]]:
+def calcular_operacoes_fechadas(usuario_id: int) -> List[Dict[str, Any]]:
     """
-    Calcula as operações fechadas (compra seguida de venda ou vice-versa).
+    Calcula as operações fechadas (compra seguida de venda ou vice-versa) para um usuário específico.
     Usa o método FIFO (First In, First Out) para rastrear as operações.
     
+    Args:
+        usuario_id: ID do usuário.
+        
     Returns:
         List[Dict[str, Any]]: Lista de operações fechadas.
     """
-    # Obtém todas as operações
-    operacoes = obter_todas_operacoes()
+    # Obtém todas as operações para o usuário
+    operacoes = obter_todas_operacoes(usuario_id=usuario_id)
     
     # Dicionário para rastrear as operações por ticker
     operacoes_por_ticker = defaultdict(list)
@@ -356,19 +372,20 @@ def _processar_fechamento_operacoes(op_atual, ops_pendentes, operacoes_fechadas,
     if quantidade_restante > 0:
         op_restante = op_atual.copy()
         op_restante["quantity"] = quantidade_restante
-        if tipo == "compra-venda":
-            # Adiciona a compra restante à fila de pendentes
-            ops_pendentes.append(op_restante)
-        else:
-            # Adiciona a venda restante à fila de pendentes
-            ops_pendentes.append(op_restante)
+        # This logic for appending back might need review based on how ops_pendentes is structured
+        # For FIFO, if op_atual was a buy and it's not fully consumed by sales, it becomes a buy_pending.
+        # If op_atual was a sell and not fully covered by buys, it's a sell_pending (short).
+        ops_pendentes.append(op_restante) # Simplified: just add the remainder
 
-def recalcular_carteira() -> None:
+def recalcular_carteira(usuario_id: int) -> None:
     """
-    Recalcula a carteira atual com base em todas as operações.
+    Recalcula a carteira atual com base em todas as operações para um usuário específico.
+
+    Args:
+        usuario_id: ID do usuário.
     """
-    # Obtém todas as operações
-    operacoes = obter_todas_operacoes()  # Corrigido de obter_todas_operações
+    # Obtém todas as operações para o usuário
+    operacoes = obter_todas_operacoes(usuario_id=usuario_id)
     
     # Dicionário para armazenar a carteira atual
     carteira = defaultdict(lambda: {"quantidade": 0, "custo_total": 0.0})
@@ -400,15 +417,22 @@ def recalcular_carteira() -> None:
     
     # Atualiza a carteira no banco de dados
     for ticker, dados in carteira.items():
-        if dados["quantidade"] != 0:  # Só mantém na carteira se ainda tiver ações
-            atualizar_carteira(ticker, dados["quantidade"], dados["custo_total"] / dados["quantidade"])
+        if dados["quantidade"] > 0:  # Só mantém na carteira se ainda tiver ações
+            preco_medio_calculado = (dados["custo_total"] / dados["quantidade"]) if dados["quantidade"] > 0 else 0
+            atualizar_carteira(ticker, dados["quantidade"], preco_medio_calculado, usuario_id=usuario_id)
+        # else: # Optionally, delete from carteira_atual if quantity is zero
+            # database.remover_item_carteira(ticker, usuario_id) # Requires new DB function
 
-def recalcular_resultados() -> None:
+
+def recalcular_resultados(usuario_id: int) -> None:
     """
-    Recalcula os resultados mensais com base em todas as operações.
+    Recalcula os resultados mensais com base em todas as operações para um usuário específico.
+
+    Args:
+        usuario_id: ID do usuário.
     """
-    # Obtém todas as operações
-    operacoes = obter_todas_operacoes()
+    # Obtém todas as operações para o usuário
+    operacoes = obter_todas_operacoes(usuario_id=usuario_id)
     
     # Agrupa as operações por mês
     operacoes_por_mes = defaultdict(list)
@@ -444,7 +468,7 @@ def recalcular_resultados() -> None:
         
         # Processa cada dia
         for dia, ops_dia in sorted(operacoes_por_dia.items()):
-            resultado_dia_swing, resultado_dia_day = _calcular_resultado_dia(ops_dia)
+            resultado_dia_swing, resultado_dia_day = _calcular_resultado_dia(ops_dia, usuario_id=usuario_id)
             
             # Acumula os resultados do dia no mês
             resultado_mes_swing["vendas"] += resultado_dia_swing["vendas"]
@@ -531,164 +555,7 @@ def recalcular_resultados() -> None:
             })
         
         # Salva o resultado mensal no banco de dados
-        salvar_resultado_mensal(resultado)
-    """
-    Recalcula os resultados mensais com base em todas as operações.
-    """
-    # Obtém todas as operações
-    operacoes = obter_todas_operacoes()
-    
-    # Agrupa as operações por mês
-    operacoes_por_mes = defaultdict(list)
-    for op in operacoes:
-        mes = op["date"].strftime("%Y-%m")
-        operacoes_por_mes[mes].append(op)
-    
-    # Dicionários para armazenar os prejuízos acumulados
-    prejuizo_acumulado_swing = 0.0
-    prejuizo_acumulado_day = 0.0
-    
-    # Processa cada mês
-    for mes, ops_mes in sorted(operacoes_por_mes.items()):
-        # Agrupa as operações por dia
-        operacoes_por_dia = defaultdict(list)
-        for op in ops_mes:
-            dia = op["date"].isoformat()
-            operacoes_por_dia[dia].append(op)
-        
-        # Inicializa os resultados do mês
-        resultado_mes_swing = {
-            "vendas": 0.0,
-            "custo": 0.0,
-            "ganho_liquido": 0.0
-        }
-        
-        resultado_mes_day = {
-            "vendas": 0.0,
-            "custo": 0.0,
-            "ganho_liquido": 0.0,
-            "irrf": 0.0
-        }
-        
-        # Processa cada dia
-        for dia, ops_dia in sorted(operacoes_por_dia.items()):
-            resultado_dia_swing, resultado_dia_day = _calcular_resultado_dia(ops_dia)
-            
-            # Acumula os resultados do dia no mês
-            resultado_mes_swing["vendas"] += resultado_dia_swing["vendas"]
-            resultado_mes_swing["custo"] += resultado_dia_swing["custo"]
-            resultado_mes_swing["ganho_liquido"] += resultado_dia_swing["ganho_liquido"]
-            
-            resultado_mes_day["vendas"] += resultado_dia_day["vendas"]
-            resultado_mes_day["custo"] += resultado_dia_day["custo"]
-            resultado_mes_day["ganho_liquido"] += resultado_dia_day["ganho_liquido"]
-            resultado_mes_day["irrf"] += resultado_dia_day["irrf"]
-        
-        # Verifica se o swing trade é isento (vendas mensais até R$ 20.000)
-        isento_swing = resultado_mes_swing["vendas"] <= 20000.0
-        
-        # Aplica a compensação de prejuízos
-        if prejuizo_acumulado_swing > 0 and resultado_mes_swing["ganho_liquido"] > 0:
-            # Compensa o prejuízo acumulado de swing trade
-            compensacao = min(prejuizo_acumulado_swing, resultado_mes_swing["ganho_liquido"])
-            resultado_mes_swing["ganho_liquido"] -= compensacao
-            prejuizo_acumulado_swing -= compensacao
-        elif resultado_mes_swing["ganho_liquido"] < 0:
-            # Acumula o prejuízo de swing trade
-            prejuizo_acumulado_swing += abs(resultado_mes_swing["ganho_liquido"])
-            resultado_mes_swing["ganho_liquido"] = 0
-        
-        if prejuizo_acumulado_day > 0 and resultado_mes_day["ganho_liquido"] > 0:
-            # Compensa o prejuízo acumulado de day trade
-            compensacao = min(prejuizo_acumulado_day, resultado_mes_day["ganho_liquido"])
-            resultado_mes_day["ganho_liquido"] -= compensacao
-            prejuizo_acumulado_day -= compensacao
-        elif resultado_mes_day["ganho_liquido"] < 0:
-            # Acumula o prejuízo de day trade
-            prejuizo_acumulado_day += abs(resultado_mes_day["ganho_liquido"])
-            resultado_mes_day["ganho_liquido"] = 0
-        
-        # Calcula o IR devido
-        ir_devido_swing = 0.0 if isento_swing else resultado_mes_swing["ganho_liquido"] * 0.15
-        ir_devido_day = max(0, resultado_mes_day["ganho_liquido"] * 0.20)
-        
-        # Calcula o IR a pagar (já descontando o IRRF)
-        ir_pagar_swing = max(0, ir_devido_swing - (resultado_mes_swing["vendas"] * 0.00005))
-        ir_pagar_day = max(0, ir_devido_day - resultado_mes_day["irrf"])
-        
-        # Gera o DARF se necessário
-        darf = None
-        if ir_pagar_day > 0:
-            # Calcula a data de vencimento (último dia útil do mês seguinte)
-            ano, mes_num = map(int, mes.split('-'))
-            ultimo_dia = calendar.monthrange(ano, mes_num + 1 if mes_num < 12 else 1)[1]
-            vencimento = date(ano if mes_num < 12 else ano + 1, mes_num + 1 if mes_num < 12 else 1, ultimo_dia)
-            
-            # Ajusta para o último dia útil (simplificação: considera apenas finais de semana)
-            while vencimento.weekday() >= 5:  # 5 = sábado, 6 = domingo
-                vencimento -= timedelta(days=1)
-            
-            darf = {
-                "codigo": "6015",
-                "competencia": mes,
-                "valor": ir_pagar_day,
-                "vencimento": vencimento
-            }
-        
-        # Salva o resultado mensal
-        resultado = {
-            "mes": mes,
-            "vendas_swing": resultado_mes_swing["vendas"],
-            "custo_swing": resultado_mes_swing["custo"],
-            "ganho_liquido_swing": resultado_mes_swing["ganho_liquido"],
-            "isento_swing": isento_swing,
-            "ganho_liquido_day": resultado_mes_day["ganho_liquido"],
-            "ir_devido_day": ir_devido_day,
-            "irrf_day": resultado_mes_day["irrf"],
-            "ir_pagar_day": ir_pagar_day,
-            "prejuizo_acumulado_swing": prejuizo_acumulado_swing,
-            "prejuizo_acumulado_day": prejuizo_acumulado_day
-        }
-        
-        if darf:
-            resultado.update({
-                "darf_codigo": darf["codigo"],
-                "darf_competencia": darf["competencia"],
-                "darf_valor": darf["valor"],
-                "darf_vencimento": darf["vencimento"]
-            })
-        
-        # ERRO AQUI: A função está sendo chamada com dois argumentos, mas espera apenas um
-        # Código incorreto: salvar_resultado_mensal(data_primeiro_dia, dados["resultado"])
-        # Código correto:
-        salvar_resultado_mensal(resultado)
-    """
-    Recalcula os resultados mensais com base em todas as operações.
-    """
-    # Obtém todas as operações
-    operacoes = obter_todas_operacoes()  # Corrigido de obter_todas_operações
-    
-    # Dicionário para armazenar resultados mensais
-    resultados_mensais = defaultdict(lambda: {"resultado": 0.0})
-    
-    # Processa cada operação
-    for op in operacoes:
-        ticker = op["ticker"]
-        quantidade = op["quantity"]
-        valor = quantidade * op["price"]
-        data = op["date"]
-        
-        # Formata a data para o início do mês
-        ano, mes = data.year, data.month
-        mes_primeiro_dia = date(ano, mes, 1)
-        
-        if op["operation"] == "buy":
-            # Compra: subtrai do resultado mensal
-            resultados_mensais[mes_primeiro_dia]["resultado"] -= valor + op["fees"]
-        else:
-            # Venda: adiciona ao resultado mensal
-            resultados_mensais[mes_primeiro_dia]["resultado"] += valor - op["fees"]
-    
-    # Salva os resultados mensais no banco de dados
-    for data_primeiro_dia, dados in resultados_mensais.items():
-        salvar_resultado_mensal(data_primeiro_dia, dados["resultado"])            
+        salvar_resultado_mensal(resultado, usuario_id=usuario_id)
+    # The duplicated block below was removed by the previous patch.
+    # This search block is to ensure the context for removing the duplicated section correctly.
+    # If this search block is not found, it means the duplication was already removed.

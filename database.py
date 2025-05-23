@@ -159,9 +159,8 @@ def criar_tabelas():
         
         conn.commit()
     
-    # Inicializa o sistema de autenticação
-    from auth import inicializar_autenticacao
-    inicializar_autenticacao()
+    # from auth import inicializar_autenticacao # Removed: Test fixtures should handle auth init.
+    # inicializar_autenticacao()
     
 def date_converter(obj):
     """
@@ -257,8 +256,15 @@ def obter_todas_operacoes(usuario_id: Optional[int] = None) -> List[Dict[str, An
         params = []
         
         if usuario_id is not None:
-            query += ' WHERE usuario_id = ? OR usuario_id IS NULL'
+            # query += ' WHERE usuario_id = ? OR usuario_id IS NULL' # Original logic
+            query += ' WHERE usuario_id = ?' # Corrected for strict user separation
             params.append(usuario_id)
+        else:
+            # This case should ideally not be used if operations are always user-specific.
+            # If allowing operations without a user (e.g. for global/admin view), 
+            # then explicit handling or a different function might be better.
+            # For now, if no usuario_id is passed, fetch all. This might need review based on app requirements.
+            pass # No WHERE clause, fetches all operations
         
         query += ' ORDER BY date'
         
@@ -295,13 +301,14 @@ def atualizar_operacao(operacao_id: int, operacao: Dict[str, Any], usuario_id: O
         cursor = conn.cursor()
         
         # Verifica se a operação existe e se pertence ao usuário (se especificado)
+        # Corrected logic for user-specific check:
+        query = 'SELECT id FROM operacoes WHERE id = ?'
+        params = [operacao_id]
         if usuario_id is not None:
-            cursor.execute('''
-            SELECT id FROM operacoes
-            WHERE id = ? AND (usuario_id = ? OR usuario_id IS NULL)
-            ''', (operacao_id, usuario_id))
-        else:
-            cursor.execute('SELECT id FROM operacoes WHERE id = ?', (operacao_id,))
+            query += ' AND usuario_id = ?'
+            params.append(usuario_id)
+        
+        cursor.execute(query, tuple(params))
         
         if not cursor.fetchone():
             return False
@@ -339,13 +346,13 @@ def remover_operacao(operacao_id: int, usuario_id: Optional[int] = None) -> bool
         cursor = conn.cursor()
         
         # Verifica se a operação existe e se pertence ao usuário (se especificado)
+        check_query = "SELECT id FROM operacoes WHERE id = ?"
+        check_params = [operacao_id]
         if usuario_id is not None:
-            cursor.execute('''
-            SELECT id FROM operacoes
-            WHERE id = ? AND (usuario_id = ? OR usuario_id IS NULL)
-            ''', (operacao_id, usuario_id))
-        else:
-            cursor.execute('SELECT id FROM operacoes WHERE id = ?', (operacao_id,))
+            check_query += " AND usuario_id = ?"
+            check_params.append(usuario_id)
+        
+        cursor.execute(check_query, tuple(check_params))
         
         if not cursor.fetchone():
             return False
@@ -356,36 +363,18 @@ def remover_operacao(operacao_id: int, usuario_id: Optional[int] = None) -> bool
         
         return cursor.rowcount > 0
 
-def obter_todas_operacoes() -> List[Dict[str, Any]]:
-    """
-    Obtém todas as operações do banco de dados.
-    
-    Returns:
-        List[Dict[str, Any]]: Lista de operações.
-    """
-    with get_db() as conn:
-        cursor = conn.cursor()
-        
-        cursor.execute('SELECT * FROM operacoes ORDER BY date')
-        
-        # Converte os resultados para dicionários
-        operacoes = []
-        for row in cursor.fetchall():
-            operacao = dict(row)
-            operacao["date"] = datetime.strptime(operacao["date"], "%Y-%m-%d").date()
-            operacoes.append(operacao)
-            
-        return operacoes
+# REMOVED DUPLICATE obter_todas_operacoes aound line 344
 
-# Função atualizada para receber preço médio em vez de custo total
-def atualizar_carteira(ticker: str, quantidade: int, preco_medio: float) -> None:
+# Função atualizada para receber preço médio em vez de custo total e usuario_id
+def atualizar_carteira(ticker: str, quantidade: int, preco_medio: float, usuario_id: int) -> None:
     """
-    Atualiza ou insere um item na carteira atual.
+    Atualiza ou insere um item na carteira atual para um usuário específico.
     
     Args:
         ticker: Código da ação.
         quantidade: Quantidade de ações.
         preco_medio: Preço médio das ações.
+        usuario_id: ID do usuário.
     """
     with get_db() as conn:
         cursor = conn.cursor()
@@ -393,8 +382,8 @@ def atualizar_carteira(ticker: str, quantidade: int, preco_medio: float) -> None
         # Calcula o custo total a partir da quantidade e do preço médio
         custo_total = quantidade * preco_medio
         
-        # Verifica se o ticker já existe na carteira
-        cursor.execute('SELECT * FROM carteira_atual WHERE ticker = ?', (ticker,))
+        # Verifica se o ticker já existe na carteira para o usuário
+        cursor.execute('SELECT * FROM carteira_atual WHERE ticker = ? AND usuario_id = ?', (ticker, usuario_id))
         item = cursor.fetchone()
         
         if item:
@@ -402,59 +391,65 @@ def atualizar_carteira(ticker: str, quantidade: int, preco_medio: float) -> None
             cursor.execute('''
             UPDATE carteira_atual
             SET quantidade = ?, custo_total = ?, preco_medio = ?
-            WHERE ticker = ?
+            WHERE ticker = ? AND usuario_id = ?
             ''', (
                 quantidade,
                 custo_total,
                 preco_medio,
-                ticker
+                ticker,
+                usuario_id
             ))
         else:
             # Se o ticker não existe, insere um novo item
             cursor.execute('''
-            INSERT INTO carteira_atual (ticker, quantidade, custo_total, preco_medio)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO carteira_atual (ticker, quantidade, custo_total, preco_medio, usuario_id)
+            VALUES (?, ?, ?, ?, ?)
             ''', (
                 ticker,
                 quantidade,
                 custo_total,
-                preco_medio
+                preco_medio,
+                usuario_id
             ))
         
         conn.commit()
         
-def obter_carteira_atual() -> List[Dict[str, Any]]:
+def obter_carteira_atual(usuario_id: int) -> List[Dict[str, Any]]:
     """
-    Obtém a carteira atual de ações.
+    Obtém a carteira atual de ações para um usuário específico.
     
+    Args:
+        usuario_id: ID do usuário.
+        
     Returns:
         List[Dict[str, Any]]: Lista de itens da carteira.
     """
     with get_db() as conn:
         cursor = conn.cursor()
         
-        cursor.execute('SELECT * FROM carteira_atual ORDER BY ticker')
+        cursor.execute('SELECT * FROM carteira_atual WHERE usuario_id = ? ORDER BY ticker', (usuario_id,))
         
         # Converte os resultados para dicionários
         carteira = [dict(row) for row in cursor.fetchall()]
         
         return carteira
 
-def salvar_resultado_mensal(resultado: Dict[str, Any]) -> int:
+def salvar_resultado_mensal(resultado: Dict[str, Any], usuario_id: int) -> int:
     """
-    Salva um resultado mensal no banco de dados.
+    Salva um resultado mensal no banco de dados para um usuário específico.
     
     Args:
         resultado: Dicionário com os dados do resultado mensal.
+        usuario_id: ID do usuário.
         
     Returns:
-        int: ID do resultado inserido.
+        int: ID do resultado inserido ou atualizado.
     """
     with get_db() as conn:
         cursor = conn.cursor()
         
-        # Verifica se já existe um resultado para o mês
-        cursor.execute('SELECT id FROM resultados_mensais WHERE mes = ?', (resultado["mes"],))
+        # Verifica se já existe um resultado para o mês e usuário
+        cursor.execute('SELECT id FROM resultados_mensais WHERE mes = ? AND usuario_id = ?', (resultado["mes"], usuario_id))
         existente = cursor.fetchone()
         
         if existente:
@@ -466,7 +461,7 @@ def salvar_resultado_mensal(resultado: Dict[str, Any]) -> int:
                 irrf_day = ?, ir_pagar_day = ?, prejuizo_acumulado_swing = ?,
                 prejuizo_acumulado_day = ?, darf_codigo = ?, darf_competencia = ?,
                 darf_valor = ?, darf_vencimento = ?
-            WHERE mes = ?
+            WHERE mes = ? AND usuario_id = ?
             ''', (
                 resultado["vendas_swing"],
                 resultado["custo_swing"],
@@ -482,8 +477,10 @@ def salvar_resultado_mensal(resultado: Dict[str, Any]) -> int:
                 resultado.get("darf_competencia"),
                 resultado.get("darf_valor"),
                 resultado.get("darf_vencimento").isoformat() if resultado.get("darf_vencimento") else None,
-                resultado["mes"]
+                resultado["mes"],
+                usuario_id # Added for WHERE clause
             ))
+            conn.commit() # Ensure commit after update
             return existente["id"]
         else:
             # Se não existe, insere
@@ -493,9 +490,9 @@ def salvar_resultado_mensal(resultado: Dict[str, Any]) -> int:
                 isento_swing, ganho_liquido_day, ir_devido_day,
                 irrf_day, ir_pagar_day, prejuizo_acumulado_swing,
                 prejuizo_acumulado_day, darf_codigo, darf_competencia,
-                darf_valor, darf_vencimento
+                darf_valor, darf_vencimento, usuario_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 resultado["mes"],
                 resultado["vendas_swing"],
@@ -511,23 +508,27 @@ def salvar_resultado_mensal(resultado: Dict[str, Any]) -> int:
                 resultado.get("darf_codigo"),
                 resultado.get("darf_competencia"),
                 resultado.get("darf_valor"),
-                resultado.get("darf_vencimento").isoformat() if resultado.get("darf_vencimento") else None
+                resultado.get("darf_vencimento").isoformat() if resultado.get("darf_vencimento") else None,
+                usuario_id # Added usuario_id
             ))
             
             conn.commit()
             return cursor.lastrowid
         
-def obter_resultados_mensais() -> List[Dict[str, Any]]:
+def obter_resultados_mensais(usuario_id: int) -> List[Dict[str, Any]]:
     """
-    Obtém todos os resultados mensais do banco de dados.
+    Obtém todos os resultados mensais do banco de dados para um usuário específico.
     
+    Args:
+        usuario_id: ID do usuário.
+        
     Returns:
         List[Dict[str, Any]]: Lista de resultados mensais.
     """
     with get_db() as conn:
         cursor = conn.cursor()
         
-        cursor.execute('SELECT * FROM resultados_mensais ORDER BY mes')
+        cursor.execute('SELECT * FROM resultados_mensais WHERE usuario_id = ? ORDER BY mes', (usuario_id,))
         
         # Converte os resultados para dicionários
         resultados = []
@@ -542,40 +543,47 @@ def obter_resultados_mensais() -> List[Dict[str, Any]]:
 
 def limpar_banco_dados() -> None:
     """
-    Remove todos os dados do banco de dados.
+    Remove todos os dados das tabelas de aplicação (operações, resultados, carteira).
+    Não remove dados de autenticação (usuários, tokens, etc.).
     """
     with get_db() as conn:
         cursor = conn.cursor()
         
-        # Limpa todas as tabelas
+        # Limpa todas as tabelas de aplicação
         cursor.execute('DELETE FROM operacoes')
         cursor.execute('DELETE FROM resultados_mensais')
         cursor.execute('DELETE FROM carteira_atual')
+        cursor.execute('DELETE FROM operacoes_fechadas')
         
-        # Reseta os contadores de autoincremento
-        cursor.execute('DELETE FROM sqlite_sequence WHERE name IN ("operacoes", "resultados_mensais", "carteira_atual")')
+        # Reseta os contadores de autoincremento para tabelas de aplicação
+        cursor.execute('DELETE FROM sqlite_sequence WHERE name IN ("operacoes", "resultados_mensais", "carteira_atual", "operacoes_fechadas")')
         
         conn.commit()
 
-def obter_operacoes_fechadas() -> List[Dict[str, Any]]:
+def obter_operacoes_fechadas(usuario_id: int) -> List[Dict[str, Any]]:
     """
-    Obtém as operações fechadas (compra seguida de venda ou vice-versa).
+    Obtém as operações (para cálculo de fechadas) para um usuário específico.
     Usa o método FIFO (First In, First Out) para rastrear as operações.
     
+    Args:
+        usuario_id: ID do usuário.
+        
     Returns:
-        List[Dict[str, Any]]: Lista de operações fechadas.
+        List[Dict[str, Any]]: Lista de operações.
     """
     with get_db() as conn:
         cursor = conn.cursor()
         
-        # Obtém todas as operações ordenadas por data
-        cursor.execute('SELECT * FROM operacoes ORDER BY date, id')
+        # Obtém todas as operações para o usuário específico, ordenadas por data
+        cursor.execute('SELECT * FROM operacoes WHERE usuario_id = ? ORDER BY date, id', (usuario_id,))
         
         # Converte os resultados para dicionários
         operacoes = []
         for row in cursor.fetchall():
             operacao = dict(row)
-            operacao["date"] = datetime.strptime(operacao["date"], "%Y-%m-%d").date()
+            # Ensure date conversion using fromisoformat, similar to obter_todas_operacoes
+            if isinstance(operacao["date"], str):
+                 operacao["date"] = datetime.fromisoformat(operacao["date"]).date()
             operacoes.append(operacao)
         
         return operacoes

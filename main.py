@@ -311,12 +311,12 @@ async def upload_operacoes(
         operacoes_json = json.loads(conteudo)
         
         # Valida e processa as operações
-        operacoes = [OperacaoCreate(**op) for op in operacoes_json]
+        operacoes_pydantic = [OperacaoCreate(**op) for op in operacoes_json] # Renamed to avoid confusion
         
         # Salva as operações no banco de dados com o ID do usuário
-        processar_operacoes(operacoes, usuario_id=usuario["id"])
+        services.processar_operacoes(operacoes_pydantic, usuario_id=usuario["id"]) # Use services. prefix
         
-        return {"mensagem": f"Arquivo processado com sucesso. {len(operacoes)} operações importadas."}
+        return {"mensagem": f"Arquivo processado com sucesso. {len(operacoes_pydantic)} operações importadas."}
     
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="Formato de arquivo JSON inválido")
@@ -329,7 +329,7 @@ async def obter_resultados(usuario: Dict = Depends(get_current_user)):
     Retorna os resultados mensais de apuração de imposto de renda.
     """
     try:
-        resultados = calcular_resultados_mensais(usuario_id=usuario["id"])
+        resultados = services.calcular_resultados_mensais(usuario_id=usuario["id"]) # Use services. prefix
         return resultados
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro ao calcular resultados: {str(e)}")
@@ -340,7 +340,7 @@ async def obter_carteira(usuario: Dict = Depends(get_current_user)):
     Retorna a carteira atual de ações.
     """
     try:
-        carteira = calcular_carteira_atual(usuario_id=usuario["id"])
+        carteira = services.calcular_carteira_atual(usuario_id=usuario["id"]) # Use services. prefix
         return carteira
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro ao calcular carteira: {str(e)}")
@@ -351,7 +351,7 @@ async def obter_darfs(usuario: Dict = Depends(get_current_user)):
     Retorna os DARFs gerados para pagamento de imposto de renda.
     """
     try:
-        darfs = gerar_darfs(usuario_id=usuario["id"])
+        darfs = services.gerar_darfs(usuario_id=usuario["id"]) # Use services. prefix
         return darfs
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro ao gerar DARFs: {str(e)}")
@@ -370,7 +370,7 @@ async def criar_operacao(
         operacao: Dados da operação a ser criada.
     """
     try:
-        inserir_operacao_manual(operacao, usuario_id=usuario["id"])
+        services.inserir_operacao_manual(operacao, usuario_id=usuario["id"]) # Use services. prefix
         return {"mensagem": "Operação criada com sucesso."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro ao criar operação: {str(e)}")
@@ -394,7 +394,7 @@ async def atualizar_carteira(
         if ticker.upper() != dados.ticker.upper():
             raise HTTPException(status_code=400, detail="O ticker no path deve ser o mesmo do body")
         
-        atualizar_item_carteira(dados, usuario_id=usuario["id"])
+        services.atualizar_item_carteira(dados, usuario_id=usuario["id"]) # Use services. prefix
         return {"mensagem": f"Ação {ticker.upper()} atualizada com sucesso."}
     except HTTPException as e:
         raise e
@@ -408,7 +408,7 @@ async def obter_operacoes_fechadas(usuario: Dict = Depends(get_current_user)):
     Inclui detalhes como data de abertura e fechamento, preços, quantidade e resultado.
     """
     try:
-        operacoes_fechadas = calcular_operacoes_fechadas(usuario_id=usuario["id"])
+        operacoes_fechadas = services.calcular_operacoes_fechadas(usuario_id=usuario["id"]) # Use services. prefix
         return operacoes_fechadas
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro ao calcular operações fechadas: {str(e)}")
@@ -425,9 +425,47 @@ async def obter_resumo_operacoes_fechadas(usuario: Dict = Depends(get_current_us
     - Operações com maior prejuízo
     """
     try:
-        operacoes_fechadas = calcular_operacoes_fechadas(usuario_id=usuario["id"])
+        operacoes_fechadas_list = services.calcular_operacoes_fechadas(usuario_id=usuario["id"]) # Use services. prefix, renamed var
         
         # Calcula o resumo
+        # Ensure this logic uses operacoes_fechadas_list now
+        total_operacoes = len(operacoes_fechadas_list)
+        lucro_total = sum(op["resultado"] for op in operacoes_fechadas_list)
+        
+        # Separa day trade e swing trade
+        operacoes_day_trade = [op for op in operacoes_fechadas_list if op.get("day_trade", False)]
+        operacoes_swing_trade = [op for op in operacoes_fechadas_list if not op.get("day_trade", False)]
+        
+        lucro_day_trade = sum(op["resultado"] for op in operacoes_day_trade)
+        lucro_swing_trade = sum(op["resultado"] for op in operacoes_swing_trade)
+        
+        # Encontra as operações mais lucrativas e com maior prejuízo
+        operacoes_ordenadas = sorted(operacoes_fechadas_list, key=lambda x: x["resultado"], reverse=True)
+        operacoes_lucrativas = [op for op in operacoes_ordenadas if op["resultado"] > 0]
+        operacoes_prejuizo = [op for op in operacoes_ordenadas if op["resultado"] < 0]
+        
+        top_lucrativas = operacoes_lucrativas[:5] if operacoes_lucrativas else []
+        top_prejuizo = operacoes_prejuizo[:5] if operacoes_prejuizo else []
+        
+        # Calcula o resumo por ticker
+        resumo_por_ticker = {}
+        for op in operacoes_fechadas_list:
+            ticker = op["ticker"]
+            if ticker not in resumo_por_ticker:
+                resumo_por_ticker[ticker] = {
+                    "total_operacoes": 0,
+                    "lucro_total": 0,
+                    "operacoes_lucrativas": 0,
+                    "operacoes_prejuizo": 0
+                }
+            
+            resumo_por_ticker[ticker]["total_operacoes"] += 1
+            resumo_por_ticker[ticker]["lucro_total"] += op["resultado"]
+            
+            if op["resultado"] > 0:
+                resumo_por_ticker[ticker]["operacoes_lucrativas"] += 1
+            elif op["resultado"] < 0:
+                resumo_por_ticker[ticker]["operacoes_prejuizo"] += 1
         total_operacoes = len(operacoes_fechadas)
         lucro_total = sum(op["resultado"] for op in operacoes_fechadas)
         
@@ -504,10 +542,10 @@ async def deletar_operacao(
         operacao_id: ID da operação a ser removida.
     """
     try:
-        if remover_operacao(operacao_id, usuario_id=usuario["id"]):
+        if remover_operacao(operacao_id, usuario_id=usuario["id"]): # This is a direct DB call
             # Recalcula a carteira e os resultados
-            recalcular_carteira(usuario_id=usuario["id"])
-            recalcular_resultados(usuario_id=usuario["id"])
+            services.recalcular_carteira(usuario_id=usuario["id"]) # Use services. prefix
+            services.recalcular_resultados(usuario_id=usuario["id"]) # Use services. prefix
             return {"mensagem": f"Operação {operacao_id} removida com sucesso."}
         else:
             raise HTTPException(status_code=404, detail=f"Operação {operacao_id} não encontrada")
