@@ -1,8 +1,7 @@
-from pydantic import BaseModel, Field, EmailStr, validator
+from pydantic import BaseModel, Field, EmailStr, field_validator
 from pydantic import ConfigDict
-from typing import List, Optional, Literal
+from typing import List, Optional
 from datetime import date, datetime
-from decimal import Decimal
 
 # Modelos para autenticação
 
@@ -87,8 +86,7 @@ class ResultadoMensal(BaseModel):
     darf_valor: Optional[float] = None
     darf_vencimento: Optional[date] = None
 
-    class Config:
-        orm_mode = True
+    model_config = ConfigDict(from_attributes=True)
 
 class CarteiraAtual(BaseModel):
     """
@@ -99,8 +97,7 @@ class CarteiraAtual(BaseModel):
     custo_total: float
     preco_medio: float
 
-    class Config:
-        orm_mode = True
+    model_config = ConfigDict(from_attributes=True)
 
 class DARF(BaseModel):
     """
@@ -111,8 +108,7 @@ class DARF(BaseModel):
     valor: float
     vencimento: date
 
-    class Config:
-        orm_mode = True
+    model_config = ConfigDict(from_attributes=True)
 
 # Modelo atualizado para a atualização da carteira
 class AtualizacaoCarteira(BaseModel):
@@ -124,26 +120,32 @@ class AtualizacaoCarteira(BaseModel):
     quantidade: int
     preco_medio: float
 
-    @validator('ticker')
-    def ticker_uppercase(cls, v):
+    @field_validator('ticker')
+    @classmethod
+    def ticker_uppercase(cls, v: str) -> str:
         """Converte o ticker para maiúsculo"""
         return v.upper()
 
-    @validator('quantidade')
-    def quantidade_positive(cls, v):
+    @field_validator('quantidade')
+    @classmethod
+    def quantidade_positive(cls, v: int) -> int:
         """Valida se a quantidade é positiva ou zero"""
         if v < 0:
             raise ValueError('A quantidade deve ser um número positivo ou zero')
         return v
 
-    @validator('preco_medio')
-    def preco_medio_positive(cls, v, values):
+    @field_validator('preco_medio')
+    @classmethod
+    def preco_medio_positive(cls, v: float, values) -> float:
         """Valida se o preço médio é positivo ou zero, e coerente com a quantidade"""
+        # Pydantic v2 values is a FieldValidationInfo object, access data via .data
+        quantidade = values.data.get('quantidade')
+
         if v < 0:
             raise ValueError('O preço médio deve ser um número positivo ou zero')
         
         # Se a quantidade for zero, o preço médio também deve ser zero
-        if 'quantidade' in values and values['quantidade'] == 0 and v != 0:
+        if quantidade == 0 and v != 0:
             raise ValueError('Se a quantidade for zero, o preço médio também deve ser zero')
         
         return v
@@ -161,8 +163,7 @@ class OperacaoDetalhe(BaseModel):
     fees: float
     valor_total: float
 
-    class Config:
-        orm_mode = True
+    model_config = ConfigDict(from_attributes=True)
 
 class OperacaoFechada(BaseModel):
     """
@@ -180,13 +181,11 @@ class OperacaoFechada(BaseModel):
     operacoes_relacionadas: List[OperacaoDetalhe]
     day_trade: bool  # Indica se é day trade
 
-    class Config:
-        orm_mode = True
+    model_config = ConfigDict(from_attributes=True)
 
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str
 
-    class Config:
-        orm_mode = True
+    model_config = ConfigDict(from_attributes=True)
     

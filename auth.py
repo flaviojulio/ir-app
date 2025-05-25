@@ -3,17 +3,34 @@ Módulo de autenticação e autorização.
 Este módulo contém funções para gerenciar usuários, autenticação e controle de acesso.
 """
 
-import sqlite3
-import hashlib
-import secrets
-import time
-import jwt
-from datetime import datetime, timedelta
-from typing import Dict, List, Any, Optional, Tuple
-from contextlib import contextmanager
+import hashlib # Standard library
+import secrets # Standard library
+import time    # Standard library
+import jwt     # Third-party
+import os      # Standard library (for getenv)
+from datetime import datetime, timedelta # Standard library
+from typing import Dict, List, Any, Optional # Standard library
+# sqlite3, Tuple, contextmanager were unused directly in this file. get_db handles its own context.
 
 # Importa a função get_db do módulo database
 from database import get_db
+
+# Custom Exception Classes for Token Handling
+class TokenExpiredError(Exception):
+    """Raised when a token has expired."""
+    pass
+
+class InvalidTokenError(Exception):
+    """Raised when a token is invalid or malformed."""
+    pass
+
+class TokenNotFoundError(Exception):
+    """Raised when a token is not found in the database."""
+    pass
+
+class TokenRevokedError(Exception):
+    """Raised when a token has been revoked."""
+    pass
 
 # Constantes para configuração
 import os
@@ -39,7 +56,8 @@ def criar_tabelas_autenticacao() -> None:
             nome_completo TEXT,
             data_criacao TEXT NOT NULL,
             data_atualizacao TEXT NOT NULL,
-            ativo INTEGER NOT NULL DEFAULT 1
+            ativo INTEGER NOT NULL DEFAULT 1,
+            email_verificado INTEGER NOT NULL DEFAULT 0
         )
         ''')
         
@@ -87,6 +105,92 @@ def criar_tabelas_autenticacao() -> None:
                       ('admin', 'Administrador com acesso completo ao sistema'))
         cursor.execute('INSERT OR IGNORE INTO funcoes (nome, descricao) VALUES (?, ?)',
                       ('usuario', 'Usuário padrão com acesso limitado'))
+
+        # Tabela de redefinição de senha
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS redefinicao_senha (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            usuario_id INTEGER NOT NULL,
+            token TEXT NOT NULL UNIQUE,
+            data_criacao TEXT NOT NULL,
+            data_expiracao TEXT NOT NULL,
+            utilizado INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE
+        )
+        ''')
+        
+        # Índice para redefinição de senha
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_redefinicao_senha_token ON redefinicao_senha(token)')
+        
+        conn.commit()
+
+def modificar_tabelas_existentes() -> None:
+    """
+    Modifica as tabelas existentes para incluir referência ao usuário.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        
+        # Verifica se a coluna usuario_id já existe na tabela operacoes
+        cursor.execute("PRAGMA table_info(operacoes)")
+        colunas_operacoes = [coluna[1] for coluna in cursor.fetchall()]
+        
+        if 'usuario_id' not in colunas_operacoes:
+            # Adiciona a coluna usuario_id à tabela operacoes
+            cursor.execute('''
+            ALTER TABLE operacoes ADD COLUMN usuario_id INTEGER DEFAULT NULL
+            ''')
+        
+        # Verifica se a coluna usuario_id já existe na tabela resultados_mensais
+        cursor.execute("PRAGMA table_info(resultados_mensais)")
+        colunas_resultados = [coluna[1] for coluna in cursor.fetchall()]
+        
+        if 'usuario_id' not in colunas_resultados:
+            # Adiciona a coluna usuario_id à tabela resultados_mensais
+            cursor.execute('''
+            ALTER TABLE resultados_mensais ADD COLUMN usuario_id INTEGER DEFAULT NULL
+            ''')
+        
+        # Verifica se a coluna usuario_id já existe na tabela carteira_atual
+        cursor.execute("PRAGMA table_info(carteira_atual)")
+        colunas_carteira = [coluna[1] for coluna in cursor.fetchall()]
+        
+        if 'usuario_id' not in colunas_carteira:
+            # Adiciona a coluna usuario_id à tabela carteira_atual
+            cursor.execute('''
+            ALTER TABLE carteira_atual ADD COLUMN usuario_id INTEGER DEFAULT NULL
+            ''')
+            
+            # Modifica a chave única para incluir usuario_id
+            # Verifica se a tabela temporária já existe e a remove se necessário
+            cursor.execute("DROP TABLE IF EXISTS carteira_atual_temp")
+            
+            cursor.execute('''
+            CREATE TABLE carteira_atual_temp (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker TEXT NOT NULL,
+                quantidade INTEGER NOT NULL,
+                custo_total REAL NOT NULL,
+                preco_medio REAL NOT NULL,
+                usuario_id INTEGER DEFAULT NULL,
+                UNIQUE(ticker, usuario_id)
+            )
+            ''')
+            
+            # Copia os dados da tabela antiga para a nova
+            cursor.execute('''
+            INSERT INTO carteira_atual_temp (id, ticker, quantidade, custo_total, preco_medio, usuario_id)
+            SELECT id, ticker, quantidade, custo_total, preco_medio, usuario_id FROM carteira_atual
+            ''')
+            
+            # Remove a tabela antiga
+            cursor.execute('DROP TABLE carteira_atual')
+            
+            # Renomeia a tabela temporária
+            cursor.execute('ALTER TABLE carteira_atual_temp RENAME TO carteira_atual')
+            
+            # Cria índice para a tabela carteira_atual
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_carteira_atual_usuario_id ON carteira_atual(usuario_id)')
         
         conn.commit()
 
@@ -524,33 +628,67 @@ def gerar_token(usuario_id: int) -> str:
     
     return token
 
-def verificar_token(token: str) -> Optional[Dict[str, Any]]:
+def verificar_token(token: str) -> Dict[str, Any]:
+    """
+    Verifica um token JWT.
+    
+    Args:
+        token: Token JWT.
+        
+    Returns:
+        Dict[str, Any]: Payload do token se válido.
+        
+    Raises:
+        TokenNotFoundError: Se o token não for encontrado no banco de dados.
+        TokenRevokedError: Se o token foi revogado.
+        TokenExpiredError: Se o token expirou.
+        InvalidTokenError: Se o token for inválido ou malformado.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+        SELECT id, revogado 
+        FROM tokens
+        WHERE token = ?
+        ''', (token,))
+        token_data = cursor.fetchone()
+
+        if not token_data:
+            raise TokenNotFoundError("Token not found in database")
+
+        if token_data['revogado']:
+            raise TokenRevokedError("Token has been revoked")
+
     try:
-        with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-            SELECT revogado, data_expiracao
-            FROM tokens
-            WHERE token = ?
-            ''', (token,))
-            token_db = cursor.fetchone()
-            
-            if not token_db or token_db['revogado']:
-                return None
-        
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        
-        if 'exp' in payload and payload['exp'] < time.time():
-            with get_db() as conn:
-                cursor = conn.cursor()
-                cursor.execute('UPDATE tokens SET revogado = 1 WHERE token = ?', (token,))
-                conn.commit()
-            return None
-        
+        # No need to check 'exp' here, jwt.decode will raise ExpiredSignatureError
         return payload
     
-    except jwt.PyJWTError:
-        return None
+    except jwt.ExpiredSignatureError:
+        # Marcar o token como revogado no banco de dados ao expirar
+        with get_db() as conn:
+            cursor = conn.cursor()
+            # Certifique-se de que o token_data (e, portanto, token_data['id']) está disponível aqui
+            # ou busque o ID novamente se necessário.
+            # Como já verificamos e o token existe e não foi revogado, podemos usar o ID.
+            # No entanto, para segurança, vamos verificar se token_data existe (já feito acima)
+            # e obter o ID do token para revogação.
+            # A lógica original buscava 'id' se 'token_data' fosse None, mas aqui já sabemos que existe.
+            if token_data and 'id' in token_data: # 'id' foi adicionado ao SELECT
+                 cursor.execute('UPDATE tokens SET revogado = 1 WHERE id = ?', (token_data['id'],))
+                 conn.commit()
+            else:
+                # Este caso não deveria acontecer se o token foi encontrado inicialmente
+                # mas é uma salvaguarda.
+                # Se não tivermos o ID, podemos tentar revogar pelo token string,
+                # mas é menos eficiente e já deveria ter sido tratado.
+                # Para este exemplo, vamos assumir que token_data['id'] está disponível.
+            pass # Comment about logging a warning if token_data['id'] is not available can be removed for cleanup.
+
+        raise TokenExpiredError("Token has expired")
+    
+    except jwt.PyJWTError as e: # Captura outras exceções do PyJWT
+        raise InvalidTokenError(str(e)) # The original error 'e' is included in the exception.
 
 def revogar_token(token: str) -> bool:
     """
@@ -734,12 +872,127 @@ def obter_todas_funcoes() -> List[Dict[str, Any]]:
         
         return [dict(row) for row in cursor.fetchall()]
 
+def obter_funcao(funcao_id: int) -> Optional[Dict[str, Any]]:
+    """
+    Obtém os dados de uma função pelo ID.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT id, nome, descricao FROM funcoes WHERE id = ?', (funcao_id,))
+        funcao_data = cursor.fetchone()
+        if funcao_data:
+            return dict(funcao_data)
+        return None
+
+def criar_token_redefinicao_senha(email: str) -> Optional[str]:
+    """
+    Cria um token para redefinição de senha.
+    
+    Args:
+        email: Email do usuário.
+        
+    Returns:
+        Optional[str]: Token de redefinição ou None se o usuário não for encontrado.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        
+        # Busca o usuário pelo email
+        cursor.execute('SELECT id FROM usuarios WHERE email = ?', (email,))
+        usuario = cursor.fetchone()
+        
+        if not usuario:
+            return None
+        
+        # Gera um token aleatório
+        token = secrets.token_urlsafe(32)
+        
+        # Data atual e de expiração (24 horas)
+        data_atual = datetime.now()
+        data_expiracao = data_atual + timedelta(hours=24)
+        
+        # Insere o token
+        cursor.execute('''
+        INSERT INTO redefinicao_senha (usuario_id, token, data_criacao, data_expiracao)
+        VALUES (?, ?, ?, ?)
+        ''', (
+            usuario["id"],
+            token,
+            data_atual.isoformat(),
+            data_expiracao.isoformat()
+        ))
+        
+        conn.commit()
+        
+        return token
+
+def redefinir_senha(token: str, nova_senha: str) -> bool:
+    """
+    Redefine a senha de um usuário usando um token de redefinição.
+    
+    Args:
+        token: Token de redefinição.
+        nova_senha: Nova senha em texto plano.
+        
+    Returns:
+        bool: True se a senha foi redefinida, False caso contrário.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        
+        # Busca o token
+        cursor.execute('''
+        SELECT usuario_id, data_expiracao, utilizado
+        FROM redefinicao_senha
+        WHERE token = ?
+        ''', (token,))
+        
+        redefinicao = cursor.fetchone()
+        
+        if not redefinicao:
+            return False
+        
+        if redefinicao["utilizado"]:
+            return False
+        
+        # Verifica se o token expirou
+        data_expiracao = datetime.fromisoformat(redefinicao["data_expiracao"])
+        if data_expiracao < datetime.now():
+            return False
+        
+        # Gera novo salt e hash da senha
+        salt = gerar_salt()
+        senha_hash = hash_senha(nova_senha, salt)
+        
+        # Atualiza a senha do usuário
+        cursor.execute('''
+        UPDATE usuarios
+        SET senha_hash = ?, senha_salt = ?, data_atualizacao = ?
+        WHERE id = ?
+        ''', (
+            senha_hash,
+            salt,
+            datetime.now().isoformat(),
+            redefinicao["usuario_id"]
+        ))
+        
+        # Marca o token como utilizado
+        cursor.execute('UPDATE redefinicao_senha SET utilizado = 1 WHERE token = ?', (token,))
+        
+        # Encerra todas as sessões ativas do usuário (revoga tokens JWT)
+        revogar_todos_tokens_usuario(redefinicao["usuario_id"])
+        
+        conn.commit()
+        
+        return True
+
 def inicializar_autenticacao() -> None:
     """
     Inicializa o sistema de autenticação.
-    Cria as tabelas necessárias e insere dados iniciais.
+    Cria as tabelas necessárias, modifica tabelas existentes e insere dados iniciais.
     """
     criar_tabelas_autenticacao()
+    modificar_tabelas_existentes()  # Adicionado para modificar tabelas existentes
     
     # Verifica se já existe um usuário administrador
     with get_db() as conn:

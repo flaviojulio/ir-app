@@ -1,8 +1,10 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Path, Body, Depends
+from fastapi import FastAPI, UploadFile, File, HTTPException, Path, Body, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 import json
 from typing import List, Dict, Any
 import uvicorn
+
+from auth import TokenExpiredError, InvalidTokenError, TokenNotFoundError, TokenRevokedError
 
 from models import (
     OperacaoCreate, Operacao, ResultadoMensal, CarteiraAtual, 
@@ -12,11 +14,12 @@ from models import (
 )
 
 from database import (
-    criar_tabelas, get_db, limpar_banco_dados, remover_operacao,
-    obter_todas_operacoes  # Adicionado esta importação
+    criar_tabelas, 
+    limpar_banco_dados, 
+    # get_db, remover_operacao, obter_todas_operacoes removed
 )
 
-import services
+import services # Keep this for other service functions
 from services import (
     calcular_operacoes_fechadas,
     processar_operacoes,
@@ -25,15 +28,19 @@ from services import (
     gerar_darfs,
     inserir_operacao_manual,
     atualizar_item_carteira,
-    recalcular_carteira,
-    recalcular_resultados
+    # recalcular_carteira, recalcular_resultados are internal to services now for delete
+    # Add new service imports
+    listar_operacoes_service,
+    deletar_operacao_service
 )
 
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-import auth
+import auth # Keep this for other auth functions
+# auth.get_db removed from here
 
 # Inicialização do banco de dados
-criar_tabelas()
+criar_tabelas() # Creates non-auth tables
+auth.inicializar_autenticacao() # Initializes authentication system (creates auth tables, modifies others, adds admin)
 
 app = FastAPI(
     title="API de Acompanhamento de Carteiras de Ações e IR",
@@ -54,32 +61,57 @@ app.add_middleware(
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
 # Função para obter o usuário atual
-async def get_current_user(token: str = Depends(oauth2_scheme)) -> Dict:
-    payload = auth.verificar_token(token)
-    if not payload:
+async def get_current_user(token: str = Depends(oauth2_scheme)) -> Dict[str, Any]:
+    try:
+        payload = auth.verificar_token(token)
+    except TokenExpiredError:
         raise HTTPException(
-            status_code=401,
-            detail="Token inválido ou expirado",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"message": "O token de autenticação expirou.", "error_code": "TOKEN_EXPIRED"},
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+    except InvalidTokenError as e: # Use 'as e' to include original error message
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"message": f"O token de autenticação é inválido ou malformado: {str(e)}", "error_code": "TOKEN_INVALID"},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except TokenNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"message": "O token de autenticação não foi reconhecido.", "error_code": "TOKEN_NOT_FOUND"},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except TokenRevokedError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"message": "O token de autenticação foi revogado (ex: logout ou alteração de senha).", "error_code": "TOKEN_REVOKED"},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except Exception as e: # Capture and potentially log the original exception
+        # Log the exception e for debugging (e.g., import logging; logging.exception("Unexpected error"))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            detail={"message": f"Erro inesperado durante a verificação do token: {str(e)}", "error_code": "UNEXPECTED_TOKEN_VERIFICATION_ERROR"},
+        )
+
     usuario_id = payload.get("sub")
-    if not usuario_id:
+    if not usuario_id: 
         raise HTTPException(
-            status_code=401,
-            detail="Token inválido",
+            status_code=status.HTTP_401_UNAUTHORIZED, 
+            detail={"message": "Token inválido: ID de usuário (sub) ausente no payload.", "error_code": "TOKEN_PAYLOAD_MISSING_SUB"},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    usuario_data = auth.obter_usuario(usuario_id) 
+    if not usuario_data:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, # Ou status.HTTP_404_NOT_FOUND
+            detail={"message": "Usuário associado ao token não encontrado.", "error_code": "USER_FOR_TOKEN_NOT_FOUND"},
             headers={"WWW-Authenticate": "Bearer"},
         )
     
-    usuario = auth.obter_usuario(usuario_id)
-    if not usuario:
-        raise HTTPException(
-            status_code=401,
-            detail="Usuário não encontrado",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    
-    return usuario
+    return usuario_data
 
 # Função para verificar se o usuário é administrador
 async def get_admin_user(usuario: Dict = Depends(get_current_user)) -> Dict:
@@ -119,12 +151,7 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     token = auth.gerar_token(user["id"])
     return {"access_token": token, "token_type": "bearer"}
 
-# @app.get("/api/auth/me", response_model=auth_schema.UserSchema)
-# async def me(token: str = Depends(oauth2_scheme)):
-#     payload = auth.verificar_token(token)
-#     if not payload:
-#         raise HTTPException(status_code=401, detail="Token inválido ou expirado")
-#     return services.obter_usuario(payload["sub"])
+# Commented out /api/auth/me endpoint removed.
 
 @app.post("/api/auth/logout")
 async def logout(token: str = Depends(oauth2_scheme)):
@@ -263,11 +290,12 @@ async def criar_nova_funcao(
     try:
         funcao_id = auth.criar_funcao(funcao.nome, funcao.descricao)
         
-        # Obtém a função criada
-        with auth.get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute('SELECT id, nome, descricao FROM funcoes WHERE id = ?', (funcao_id,))
-            return dict(cursor.fetchone())
+        # Obtém a função criada usando o novo serviço
+        funcao_criada = auth.obter_funcao(funcao_id)
+        if not funcao_criada:
+            # This case should ideally not happen if criar_funcao succeeded
+            raise HTTPException(status_code=500, detail="Erro ao obter função recém-criada.")
+        return funcao_criada
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -275,9 +303,10 @@ async def criar_nova_funcao(
 
 # Endpoints de operações com autenticação
 @app.get("/api/operacoes", response_model=List[Operacao])
-async def listar_operacoes(usuario: Dict = Depends(get_current_user)):
+async def listar_operacoes(usuario: Dict[str, Any] = Depends(get_current_user)): # Type hint improved
     try:
-        operacoes = obter_todas_operacoes(usuario_id=usuario["id"])
+        # Use the new service function
+        operacoes = listar_operacoes_service(usuario_id=usuario["id"])
         return operacoes
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro ao listar operações: {str(e)}")
@@ -504,15 +533,18 @@ async def deletar_operacao(
         operacao_id: ID da operação a ser removida.
     """
     try:
-        if remover_operacao(operacao_id, usuario_id=usuario["id"]):
-            # Recalcula a carteira e os resultados
-            recalcular_carteira(usuario_id=usuario["id"])
-            recalcular_resultados(usuario_id=usuario["id"])
+        # Use the new service function
+        success = deletar_operacao_service(operacao_id=operacao_id, usuario_id=usuario["id"])
+        if success:
             return {"mensagem": f"Operação {operacao_id} removida com sucesso."}
         else:
-            raise HTTPException(status_code=404, detail=f"Operação {operacao_id} não encontrada")
+            # This case might be hit if remover_operacao returned False but didn't raise an error
+            # that deletar_operacao_service would propagate.
+            # database.remover_operacao returns bool, so service translates this.
+            # If service returns False, it means op not found for that user.
+            raise HTTPException(status_code=404, detail=f"Operação {operacao_id} não encontrada ou não pertence ao usuário.")
     except HTTPException as e:
-        raise e
+        raise e # Re-raise HTTPExceptions directly
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro ao remover operação: {str(e)}")
 
