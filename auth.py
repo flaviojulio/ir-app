@@ -601,7 +601,7 @@ def gerar_token(usuario_id: int) -> str:
     expiracao = agora + JWT_EXPIRATION
     
     payload = {
-        'sub': usuario_id,
+        'sub': str(usuario_id), # Convertido para string
         'iat': agora,
         'exp': expiracao,
         'roles': funcoes
