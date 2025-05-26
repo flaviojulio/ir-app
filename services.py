@@ -538,7 +538,7 @@ def recalcular_resultados(usuario_id: int) -> None:
             })
         
         # Salva o resultado mensal no banco de dados
-        salvar_resultado_mensal(resultado)
+        salvar_resultado_mensal(resultado, usuario_id=usuario_id)
     """
     Recalcula os resultados mensais com base em todas as operações.
     """
