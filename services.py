@@ -15,7 +15,8 @@ from database import (
     # Import new/updated database functions
     obter_operacoes_para_calculo_fechadas,
     salvar_operacao_fechada,
-    limpar_operacoes_fechadas_usuario
+    limpar_operacoes_fechadas_usuario,
+    remover_operacao  # Added import for remover_operacao
 )
 
 def processar_operacoes(operacoes: List[OperacaoCreate], usuario_id: int) -> None:
@@ -538,12 +539,12 @@ def recalcular_resultados(usuario_id: int) -> None:
             })
         
         # Salva o resultado mensal no banco de dados
-        salvar_resultado_mensal(resultado)
+        salvar_resultado_mensal(resultado, usuario_id=usuario_id)
     """
     Recalcula os resultados mensais com base em todas as operações.
     """
     # Obtém todas as operações
-    operacoes = obter_todas_operacoes()
+    operacoes = obter_todas_operacoes(usuario_id=usuario_id)
     
     # Agrupa as operações por mês
     operacoes_por_mes = defaultdict(list)
@@ -579,7 +580,7 @@ def recalcular_resultados(usuario_id: int) -> None:
         
         # Processa cada dia
         for dia, ops_dia in sorted(operacoes_por_dia.items()):
-            resultado_dia_swing, resultado_dia_day = _calcular_resultado_dia(ops_dia)
+            resultado_dia_swing, resultado_dia_day = _calcular_resultado_dia(ops_dia, usuario_id=usuario_id)
             
             # Acumula os resultados do dia no mês
             resultado_mes_swing["vendas"] += resultado_dia_swing["vendas"]
@@ -666,7 +667,7 @@ def recalcular_resultados(usuario_id: int) -> None:
             })
         
         # Salva o resultado mensal no banco de dados
-        salvar_resultado_mensal(resultado_final_mes, usuario_id=usuario_id)
+        salvar_resultado_mensal(resultado, usuario_id=usuario_id)
 
 def listar_operacoes_service(usuario_id: int) -> List[Dict[str, Any]]:
     """

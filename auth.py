@@ -601,7 +601,7 @@ def gerar_token(usuario_id: int) -> str:
     expiracao = agora + JWT_EXPIRATION
     
     payload = {
-        'sub': usuario_id,
+        'sub': str(usuario_id), # Convertido para string
         'iat': agora,
         'exp': expiracao,
         'roles': funcoes
@@ -683,7 +683,7 @@ def verificar_token(token: str) -> Dict[str, Any]:
                 # Se não tivermos o ID, podemos tentar revogar pelo token string,
                 # mas é menos eficiente e já deveria ter sido tratado.
                 # Para este exemplo, vamos assumir que token_data['id'] está disponível.
-            pass # Comment about logging a warning if token_data['id'] is not available can be removed for cleanup.
+                pass # Comment about logging a warning if token_data['id'] is not available can be removed for cleanup.
 
         raise TokenExpiredError("Token has expired")
     
