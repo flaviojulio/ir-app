@@ -1,10 +1,10 @@
-from typing import List, Dict, Any # Tuple replaced with tuple
+from typing import List, Dict, Any, Optional # Tuple replaced with tuple, Optional added
 from datetime import date, datetime, timedelta
 from decimal import Decimal # Kept for specific calculations in recalcular_resultados
 import calendar
 from collections import defaultdict
 
-from models import OperacaoCreate, AtualizacaoCarteira
+from models import OperacaoCreate, AtualizacaoCarteira, Operacao # Operacao added
 from database import (
     inserir_operacao,
     obter_todas_operacoes, # Comment removed
@@ -12,6 +12,7 @@ from database import (
     obter_carteira_atual,
     salvar_resultado_mensal,
     obter_resultados_mensais,
+    obter_operacao_por_id, # Added
     # Import new/updated database functions
     obter_operacoes_para_calculo_fechadas,
     salvar_operacao_fechada,
@@ -180,20 +181,41 @@ def gerar_darfs(usuario_id: int) -> List[Dict[str, Any]]:
 
 # Novas funções para as funcionalidades adicionais
 
-def inserir_operacao_manual(operacao: OperacaoCreate, usuario_id: int) -> None:
+def inserir_operacao_manual(operacao: OperacaoCreate, usuario_id: int) -> int:
     """
     Insere uma operação manualmente para um usuário e recalcula a carteira e os resultados.
+    Retorna o ID da operação inserida.
     
     Args:
         operacao: Dados da operação a ser inserida.
         usuario_id: ID do usuário.
+        
+    Returns:
+        int: ID da operação inserida.
     """
     # Insere a operação no banco de dados
-    inserir_operacao(operacao.model_dump(), usuario_id=usuario_id)
+    new_operacao_id = inserir_operacao(operacao.model_dump(), usuario_id=usuario_id)
     
     # Recalcula a carteira e os resultados
     recalcular_carteira(usuario_id=usuario_id)
     recalcular_resultados(usuario_id=usuario_id)
+    return new_operacao_id
+
+def obter_operacao_service(operacao_id: int, usuario_id: int) -> Optional[Operacao]:
+    """
+    Obtém uma operação específica pelo ID e ID do usuário.
+    
+    Args:
+        operacao_id: ID da operação.
+        usuario_id: ID do usuário.
+        
+    Returns:
+        Optional[Operacao]: O objeto Operacao se encontrado, None caso contrário.
+    """
+    operacao_data = obter_operacao_por_id(operacao_id, usuario_id)
+    if operacao_data:
+        return Operacao(**operacao_data)
+    return None
 
 def atualizar_item_carteira(dados: AtualizacaoCarteira, usuario_id: int) -> None:
     """
@@ -205,6 +227,11 @@ def atualizar_item_carteira(dados: AtualizacaoCarteira, usuario_id: int) -> None
     """
     # Atualiza o item na carteira
     atualizar_carteira(dados.ticker, dados.quantidade, dados.preco_medio, usuario_id=usuario_id)
+    
+    # Adiciona chamadas para recalcular tudo após a atualização manual da carteira
+    recalcular_carteira(usuario_id=usuario_id)
+    recalcular_resultados(usuario_id=usuario_id)
+    calcular_operacoes_fechadas(usuario_id=usuario_id)
 
 
 def calcular_operacoes_fechadas(usuario_id: int) -> List[Dict[str, Any]]:
@@ -308,51 +335,69 @@ def calcular_operacoes_fechadas(usuario_id: int) -> List[Dict[str, Any]]:
 
 def _criar_operacao_fechada_detalhada(op_abertura: Dict, op_fechamento: Dict, quantidade_fechada: int, tipo_fechamento: str) -> Dict:
     """
-    Cria um dicionário detalhado para uma operação fechada.
+    Cria um dicionário detalhado para uma operação fechada, alinhado com OperacaoFechada e OperacaoDetalhe.
     """
-    preco_abertura = op_abertura["price"]
-    preco_fechamento = op_fechamento["price"]
+    # Preços unitários
+    preco_unitario_abertura = op_abertura["price"]
+    preco_unitario_fechamento = op_fechamento["price"]
     
-    # Proporcionaliza as taxas
-    taxas_abertura = (op_abertura["fees"] / op_abertura["quantity"]) * quantidade_fechada if op_abertura["quantity"] > 0 else 0
-    taxas_fechamento = (op_fechamento["fees"] / op_fechamento["quantity"]) * quantidade_fechada if op_fechamento["quantity"] > 0 else 0
+    # Taxas proporcionais
+    taxas_proporcionais_abertura = (op_abertura["fees"] / op_abertura["quantity"]) * quantidade_fechada if op_abertura["quantity"] > 0 else 0
+    taxas_proporcionais_fechamento = (op_fechamento["fees"] / op_fechamento["quantity"]) * quantidade_fechada if op_fechamento["quantity"] > 0 else 0
 
-    valor_total_abertura = preco_abertura * quantidade_fechada
-    valor_total_fechamento = preco_fechamento * quantidade_fechada
+    # Valores totais para cálculo do resultado
+    valor_total_abertura_calculo = preco_unitario_abertura * quantidade_fechada
+    valor_total_fechamento_calculo = preco_unitario_fechamento * quantidade_fechada
 
+    # Determina o tipo e calcula o resultado
     if tipo_fechamento == "compra_fechada_com_venda": # Compra (abertura) e Venda (fechamento)
-        resultado_bruto = valor_total_fechamento - valor_total_abertura
-        resultado_liquido = resultado_bruto - taxas_abertura - taxas_fechamento
-        percentual_lucro = (resultado_liquido / (valor_total_abertura + taxas_abertura)) * 100 if (valor_total_abertura + taxas_abertura) != 0 else 0
+        tipo_operacao_fechada = "compra-venda"
+        resultado_bruto = valor_total_fechamento_calculo - valor_total_abertura_calculo
+        resultado_liquido = resultado_bruto - taxas_proporcionais_abertura - taxas_proporcionais_fechamento
         data_ab = op_abertura["date"]
         data_fec = op_fechamento["date"]
-        val_compra = valor_total_abertura
-        val_venda = valor_total_fechamento
     elif tipo_fechamento == "venda_descoberta_fechada_com_compra": # Venda (abertura) e Compra (fechamento)
-        resultado_bruto = valor_total_abertura - valor_total_fechamento # Venda é abertura aqui
-        resultado_liquido = resultado_bruto - taxas_abertura - taxas_fechamento
-        percentual_lucro = (resultado_liquido / (valor_total_fechamento + taxas_fechamento)) * 100 if (valor_total_fechamento + taxas_fechamento) != 0 else 0
-        data_ab = op_abertura["date"] # Venda é abertura
-        data_fec = op_fechamento["date"] # Compra é fechamento
-        val_compra = valor_total_fechamento # Custo da recompra
-        val_venda = valor_total_abertura # Valor da venda a descoberto
+        tipo_operacao_fechada = "venda-compra"
+        resultado_bruto = valor_total_abertura_calculo - valor_total_fechamento_calculo # Venda é abertura (valor maior)
+        resultado_liquido = resultado_bruto - taxas_proporcionais_abertura - taxas_proporcionais_fechamento
+        data_ab = op_abertura["date"] # Data da venda a descoberto
+        data_fec = op_fechamento["date"] # Data da recompra
     else:
         raise ValueError(f"Tipo de fechamento desconhecido: {tipo_fechamento}")
+
+    operacoes_relacionadas = [
+        {
+            "id": op_abertura.get("id"),
+            "date": op_abertura["date"],
+            "operation": op_abertura["operation"],
+            "quantity": quantidade_fechada,
+            "price": preco_unitario_abertura,
+            "fees": taxas_proporcionais_abertura,
+            "valor_total": preco_unitario_abertura * quantidade_fechada
+        },
+        {
+            "id": op_fechamento.get("id"),
+            "date": op_fechamento["date"],
+            "operation": op_fechamento["operation"],
+            "quantity": quantidade_fechada,
+            "price": preco_unitario_fechamento,
+            "fees": taxas_proporcionais_fechamento,
+            "valor_total": preco_unitario_fechamento * quantidade_fechada
+        }
+    ]
 
     return {
         "ticker": op_abertura["ticker"],
         "data_abertura": data_ab,
         "data_fechamento": data_fec,
+        "tipo": tipo_operacao_fechada,
         "quantidade": quantidade_fechada,
-        "valor_compra": val_compra, # Representa o custo total da compra
-        "valor_venda": val_venda,   # Representa o valor total da venda
+        "preco_abertura": preco_unitario_abertura,
+        "preco_fechamento": preco_unitario_fechamento,
+        "taxas_total": taxas_proporcionais_abertura + taxas_proporcionais_fechamento,
         "resultado": resultado_liquido,
-        "percentual_lucro": percentual_lucro,
-        "day_trade": op_abertura["date"] == op_fechamento["date"],
-        # Adicionar mais detalhes se necessário, como IDs das operações originais
-        "id_operacao_abertura": op_abertura.get("id"),
-        "id_operacao_fechamento": op_fechamento.get("id"),
-        "taxas_total": taxas_abertura + taxas_fechamento
+        "operacoes_relacionadas": operacoes_relacionadas,
+        "day_trade": op_abertura["date"] == op_fechamento["date"]
     }
 
 
@@ -540,134 +585,6 @@ def recalcular_resultados(usuario_id: int) -> None:
         
         # Salva o resultado mensal no banco de dados
         salvar_resultado_mensal(resultado, usuario_id=usuario_id)
-    """
-    Recalcula os resultados mensais com base em todas as operações.
-    """
-    # Obtém todas as operações
-    operacoes = obter_todas_operacoes(usuario_id=usuario_id)
-    
-    # Agrupa as operações por mês
-    operacoes_por_mes = defaultdict(list)
-    for op in operacoes:
-        mes = op["date"].strftime("%Y-%m")
-        operacoes_por_mes[mes].append(op)
-    
-    # Dicionários para armazenar os prejuízos acumulados
-    prejuizo_acumulado_swing = 0.0
-    prejuizo_acumulado_day = 0.0
-    
-    # Processa cada mês
-    for mes, ops_mes in sorted(operacoes_por_mes.items()):
-        # Agrupa as operações por dia
-        operacoes_por_dia = defaultdict(list)
-        for op in ops_mes:
-            dia = op["date"].isoformat()
-            operacoes_por_dia[dia].append(op)
-        
-        # Inicializa os resultados do mês
-        resultado_mes_swing = {
-            "vendas": 0.0,
-            "custo": 0.0,
-            "ganho_liquido": 0.0
-        }
-        
-        resultado_mes_day = {
-            "vendas": 0.0,
-            "custo": 0.0,
-            "ganho_liquido": 0.0,
-            "irrf": 0.0
-        }
-        
-        # Processa cada dia
-        for dia, ops_dia in sorted(operacoes_por_dia.items()):
-            resultado_dia_swing, resultado_dia_day = _calcular_resultado_dia(ops_dia, usuario_id=usuario_id)
-            
-            # Acumula os resultados do dia no mês
-            resultado_mes_swing["vendas"] += resultado_dia_swing["vendas"]
-            resultado_mes_swing["custo"] += resultado_dia_swing["custo"]
-            resultado_mes_swing["ganho_liquido"] += resultado_dia_swing["ganho_liquido"]
-            
-            resultado_mes_day["vendas"] += resultado_dia_day["vendas"]
-            resultado_mes_day["custo"] += resultado_dia_day["custo"]
-            resultado_mes_day["ganho_liquido"] += resultado_dia_day["ganho_liquido"]
-            resultado_mes_day["irrf"] += resultado_dia_day["irrf"]
-        
-        # Verifica se o swing trade é isento (vendas mensais até R$ 20.000)
-        isento_swing = resultado_mes_swing["vendas"] <= 20000.0
-        
-        # Aplica a compensação de prejuízos
-        if prejuizo_acumulado_swing > 0 and resultado_mes_swing["ganho_liquido"] > 0:
-            # Compensa o prejuízo acumulado de swing trade
-            compensacao = min(prejuizo_acumulado_swing, resultado_mes_swing["ganho_liquido"])
-            resultado_mes_swing["ganho_liquido"] -= compensacao
-            prejuizo_acumulado_swing -= compensacao
-        elif resultado_mes_swing["ganho_liquido"] < 0:
-            # Acumula o prejuízo de swing trade
-            prejuizo_acumulado_swing += abs(resultado_mes_swing["ganho_liquido"])
-            resultado_mes_swing["ganho_liquido"] = 0
-        
-        if prejuizo_acumulado_day > 0 and resultado_mes_day["ganho_liquido"] > 0:
-            # Compensa o prejuízo acumulado de day trade
-            compensacao = min(prejuizo_acumulado_day, resultado_mes_day["ganho_liquido"])
-            resultado_mes_day["ganho_liquido"] -= compensacao
-            prejuizo_acumulado_day -= compensacao
-        elif resultado_mes_day["ganho_liquido"] < 0:
-            # Acumula o prejuízo de day trade
-            prejuizo_acumulado_day += abs(resultado_mes_day["ganho_liquido"])
-            resultado_mes_day["ganho_liquido"] = 0
-        
-        # Calcula o IR devido
-        ir_devido_swing = 0.0 if isento_swing else resultado_mes_swing["ganho_liquido"] * 0.15
-        ir_devido_day = max(0, resultado_mes_day["ganho_liquido"] * 0.20)
-        
-        # Calcula o IR a pagar (já descontando o IRRF)
-        ir_pagar_swing = max(0, ir_devido_swing - (resultado_mes_swing["vendas"] * 0.00005))
-        ir_pagar_day = max(0, ir_devido_day - resultado_mes_day["irrf"])
-        
-        # Gera o DARF se necessário
-        darf = None
-        if ir_pagar_day > 0:
-            # Calcula a data de vencimento (último dia útil do mês seguinte)
-            ano, mes_num = map(int, mes.split('-'))
-            ultimo_dia = calendar.monthrange(ano, mes_num + 1 if mes_num < 12 else 1)[1]
-            vencimento = date(ano if mes_num < 12 else ano + 1, mes_num + 1 if mes_num < 12 else 1, ultimo_dia)
-            
-            # Ajusta para o último dia útil (simplificação: considera apenas finais de semana)
-            while vencimento.weekday() >= 5:  # 5 = sábado, 6 = domingo
-                vencimento -= timedelta(days=1)
-            
-            darf = {
-                "codigo": "6015",
-                "competencia": mes,
-                "valor": ir_pagar_day,
-                "vencimento": vencimento
-            }
-        
-        # Salva o resultado mensal
-        resultado = {
-            "mes": mes,
-            "vendas_swing": resultado_mes_swing["vendas"],
-            "custo_swing": resultado_mes_swing["custo"],
-            "ganho_liquido_swing": resultado_mes_swing["ganho_liquido"],
-            "isento_swing": isento_swing,
-            "ganho_liquido_day": resultado_mes_day["ganho_liquido"],
-            "ir_devido_day": ir_devido_day,
-            "irrf_day": resultado_mes_day["irrf"],
-            "ir_pagar_day": ir_pagar_day,
-            "prejuizo_acumulado_swing": prejuizo_acumulado_swing,
-            "prejuizo_acumulado_day": prejuizo_acumulado_day
-        }
-        
-        if darf:
-            resultado.update({
-                "darf_codigo": darf["codigo"],
-                "darf_competencia": darf["competencia"],
-                "darf_valor": darf["valor"],
-                "darf_vencimento": darf["vencimento"]
-            })
-        
-        # Salva o resultado mensal no banco de dados
-        salvar_resultado_mensal(resultado, usuario_id=usuario_id)
 
 def listar_operacoes_service(usuario_id: int) -> List[Dict[str, Any]]:
     """
@@ -685,6 +602,61 @@ def deletar_operacao_service(operacao_id: int, usuario_id: int) -> bool:
         recalcular_resultados(usuario_id=usuario_id)
         return True
     return False
+
+def gerar_resumo_operacoes_fechadas(usuario_id: int) -> Dict[str, Any]:
+    """
+    Gera um resumo das operações fechadas para um usuário.
+    """
+    operacoes_fechadas = calcular_operacoes_fechadas(usuario_id=usuario_id)
+    
+    # Calcula o resumo
+    total_operacoes = len(operacoes_fechadas)
+    lucro_total = sum(op["resultado"] for op in operacoes_fechadas)
+    
+    # Separa day trade e swing trade
+    operacoes_day_trade = [op for op in operacoes_fechadas if op.get("day_trade", False)]
+    operacoes_swing_trade = [op for op in operacoes_fechadas if not op.get("day_trade", False)]
+    
+    lucro_day_trade = sum(op["resultado"] for op in operacoes_day_trade)
+    lucro_swing_trade = sum(op["resultado"] for op in operacoes_swing_trade)
+    
+    # Encontra as operações mais lucrativas e com maior prejuízo
+    # Certifique-se de que 'resultado' existe em cada 'op'
+    operacoes_ordenadas = sorted(operacoes_fechadas, key=lambda x: x.get("resultado", 0), reverse=True)
+    operacoes_lucrativas = [op for op in operacoes_ordenadas if op.get("resultado", 0) > 0]
+    operacoes_prejuizo = [op for op in operacoes_ordenadas if op.get("resultado", 0) < 0] # Corrigido para < 0
+    
+    top_lucrativas = operacoes_lucrativas[:5]
+    top_prejuizo = sorted(operacoes_prejuizo, key=lambda x: x.get("resultado", 0))[:5] # Ordena por menor resultado para pegar os maiores prejuízos
+
+    # Calcula o resumo por ticker
+    resumo_por_ticker = defaultdict(lambda: {
+        "total_operacoes": 0,
+        "lucro_total": 0.0, # Certifique-se que é float
+        "operacoes_lucrativas": 0,
+        "operacoes_prejuizo": 0
+    })
+    for op in operacoes_fechadas:
+        ticker = op["ticker"]
+        resumo_por_ticker[ticker]["total_operacoes"] += 1
+        resumo_por_ticker[ticker]["lucro_total"] += op.get("resultado", 0)
+        
+        if op.get("resultado", 0) > 0:
+            resumo_por_ticker[ticker]["operacoes_lucrativas"] += 1
+        elif op.get("resultado", 0) < 0:
+            resumo_por_ticker[ticker]["operacoes_prejuizo"] += 1
+    
+    return {
+        "total_operacoes": total_operacoes,
+        "lucro_total": lucro_total,
+        "lucro_day_trade": lucro_day_trade,
+        "lucro_swing_trade": lucro_swing_trade,
+        "total_day_trade": len(operacoes_day_trade),
+        "total_swing_trade": len(operacoes_swing_trade),
+        "top_lucrativas": top_lucrativas,
+        "top_prejuizo": top_prejuizo,
+        "resumo_por_ticker": dict(resumo_por_ticker) # Converte defaultdict para dict para a resposta
+    }
 
 # A função recalcular_resultados abaixo do comentário parece ser uma versão mais antiga ou incorreta.
 # Vou remover para evitar confusão, pois a de cima já foi atualizada.

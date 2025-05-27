@@ -884,6 +884,123 @@ def obter_funcao(funcao_id: int) -> Optional[Dict[str, Any]]:
             return dict(funcao_data)
         return None
 
+def obter_funcao_por_nome(nome: str) -> Optional[Dict[str, Any]]:
+    """
+    Obtém os dados de uma função pelo nome.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT id, nome, descricao FROM funcoes WHERE nome = ?', (nome,))
+        funcao_data = cursor.fetchone()
+        if funcao_data:
+            return dict(funcao_data)
+        return None
+
+def atualizar_funcao(funcao_id: int, nome: Optional[str] = None, descricao: Optional[str] = None) -> bool:
+    """
+    Atualiza o nome e/ou descrição de uma função.
+
+    Args:
+        funcao_id: ID da função a ser atualizada.
+        nome: Novo nome para a função (opcional).
+        descricao: Nova descrição para a função (opcional).
+
+    Returns:
+        bool: True se a atualização foi bem-sucedida, False caso contrário.
+              Retorna False se a função não for encontrada ou se o novo nome
+              causar um conflito de unicidade.
+    
+    Raises:
+        ValueError: Se o novo nome fornecido for uma string vazia, ou se o nome já existir para outra função.
+    """
+    if nome is not None and not nome.strip():
+        raise ValueError("O nome da função não pode ser vazio.")
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        # Verifica se a função existe
+        cursor.execute("SELECT nome, descricao FROM funcoes WHERE id = ?", (funcao_id,))
+        funcao_atual = cursor.fetchone()
+        if not funcao_atual:
+            return False  # Função não encontrada
+
+        campos_para_atualizar = []
+        valores_para_atualizar = []
+
+        if nome is not None and nome.strip() != funcao_atual["nome"]:
+            # Verifica se o novo nome já existe para outra função
+            cursor.execute("SELECT id FROM funcoes WHERE nome = ? AND id != ?", (nome.strip(), funcao_id))
+            if cursor.fetchone():
+                raise ValueError(f"O nome da função '{nome.strip()}' já está em uso.")
+            campos_para_atualizar.append("nome = ?")
+            valores_para_atualizar.append(nome.strip())
+        
+        if descricao is not None and descricao != funcao_atual["descricao"]:
+            campos_para_atualizar.append("descricao = ?")
+            valores_para_atualizar.append(descricao)
+
+        if not campos_para_atualizar:
+            return True # Nenhum dado para atualizar, considera sucesso
+
+        query_sql = f"UPDATE funcoes SET {', '.join(campos_para_atualizar)} WHERE id = ?"
+        valores_para_atualizar.append(funcao_id)
+
+        try:
+            cursor.execute(query_sql, tuple(valores_para_atualizar))
+            conn.commit()
+            return cursor.rowcount > 0
+        except sqlite3.IntegrityError:
+             # Captura erro de unicidade caso a verificação anterior falhe por alguma race condition (improvável em SQLite por padrão, mas boa prática)
+            raise ValueError(f"O nome da função '{nome.strip()}' já está em uso.")
+        except Exception:
+            conn.rollback() # Garante que a transação seja desfeita em caso de outros erros
+            raise # Re-levanta a exceção original para depuração
+
+def verificar_funcao_em_uso(funcao_id: int) -> bool:
+    """
+    Verifica se uma função (role) está atualmente atribuída a algum usuário.
+
+    Args:
+        funcao_id: ID da função a ser verificada.
+
+    Returns:
+        bool: True se a função estiver em uso, False caso contrário.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM usuario_funcoes WHERE funcao_id = ? LIMIT 1", (funcao_id,))
+        return cursor.fetchone() is not None
+
+def excluir_funcao(funcao_id: int) -> bool:
+    """
+    Exclui uma função do sistema, se não estiver em uso.
+
+    Args:
+        funcao_id: ID da função a ser excluída.
+
+    Returns:
+        bool: True se a função foi excluída com sucesso.
+              False se a função não foi encontrada.
+    
+    Raises:
+        ValueError: Se a função estiver atualmente em uso por algum usuário.
+    """
+    if obter_funcao(funcao_id) is None:
+        return False  # Função não encontrada
+
+    if verificar_funcao_em_uso(funcao_id):
+        raise ValueError("A função está atualmente em uso e não pode ser excluída.")
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        # A restrição ON DELETE CASCADE na tabela usuario_funcoes removerá as associações,
+        # mas a verificação acima impede a exclusão se estiver em uso.
+        # Se chegarmos aqui, a função existe e não está em uso.
+        cursor.execute("DELETE FROM funcoes WHERE id = ?", (funcao_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+
 def criar_token_redefinicao_senha(email: str) -> Optional[str]:
     """
     Cria um token para redefinição de senha.

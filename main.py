@@ -10,7 +10,7 @@ from models import (
     OperacaoCreate, Operacao, ResultadoMensal, CarteiraAtual, 
     DARF, AtualizacaoCarteira, OperacaoFechada,
     # Modelos de autenticação
-    UsuarioCreate, UsuarioUpdate, UsuarioResponse, LoginResponse, FuncaoCreate, FuncaoResponse, TokenResponse   
+    UsuarioCreate, UsuarioUpdate, UsuarioResponse, LoginResponse, FuncaoCreate, FuncaoUpdate, FuncaoResponse, TokenResponse
 )
 
 from database import (
@@ -31,7 +31,9 @@ from services import (
     # recalcular_carteira, recalcular_resultados are internal to services now for delete
     # Add new service imports
     listar_operacoes_service,
-    deletar_operacao_service
+    deletar_operacao_service,
+    obter_operacao_service, # Added for returning created operacao
+    gerar_resumo_operacoes_fechadas # Added for summary
 )
 
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
@@ -259,9 +261,13 @@ async def adicionar_funcao_a_usuario(
     if not success:
         raise HTTPException(status_code=404, detail="Usuário ou função não encontrados")
     
-    return {"mensagem": f"Função {funcao_nome} adicionada ao usuário {usuario_id}"}
+    updated_usuario = auth.obter_usuario(usuario_id)
+    if not updated_usuario:
+        # Should not happen if adicionar_funcao_usuario was successful and usuario_id is valid
+        raise HTTPException(status_code=404, detail=f"Usuário {usuario_id} não encontrado após adicionar função.")
+    return updated_usuario
 
-@app.delete("/api/usuarios/{usuario_id}/funcoes/{funcao_nome}")
+@app.delete("/api/usuarios/{usuario_id}/funcoes/{funcao_nome}", response_model=UsuarioResponse)
 async def remover_funcao_de_usuario(
     usuario_id: int = Path(..., description="ID do usuário"),
     funcao_nome: str = Path(..., description="Nome da função"),
@@ -274,9 +280,19 @@ async def remover_funcao_de_usuario(
     success = auth.remover_funcao_usuario(usuario_id, funcao_nome)
     
     if not success:
-        raise HTTPException(status_code=404, detail="Usuário ou função não encontrados")
-    
-    return {"mensagem": f"Função {funcao_nome} removida do usuário {usuario_id}"}
+        # This could mean user not found, function not found, or user didn't have the function.
+        # For simplicity, we'll check if the user exists to give a more specific 404 for the user.
+        usuario = auth.obter_usuario(usuario_id)
+        if not usuario:
+            raise HTTPException(status_code=404, detail=f"Usuário {usuario_id} não encontrado.")
+        # If user exists, the issue was with the function or its assignment.
+        raise HTTPException(status_code=404, detail=f"Função '{funcao_nome}' não encontrada ou não associada ao usuário {usuario_id}.")
+
+    updated_usuario = auth.obter_usuario(usuario_id)
+    if not updated_usuario:
+        # Should not happen if remover_funcao_usuario was successful and usuario_id is valid
+        raise HTTPException(status_code=404, detail=f"Usuário {usuario_id} não encontrado após remover função.")
+    return updated_usuario
 
 # Endpoints para gerenciar funções
 @app.get("/api/funcoes", response_model=List[FuncaoResponse])
@@ -309,6 +325,77 @@ async def criar_nova_funcao(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro ao criar função: {str(e)}")
+
+@app.put("/api/funcoes/{funcao_id}", response_model=FuncaoResponse)
+async def atualizar_funcao_existente(
+    funcao_id: int = Path(..., description="ID da função a ser atualizada"),
+    funcao_data: FuncaoUpdate = Body(...),
+    admin: Dict = Depends(get_admin_user)
+):
+    """
+    Atualiza uma função existente no sistema.
+    Requer permissão de administrador.
+    """
+    try:
+        # Verificar se pelo menos um campo foi enviado para atualização
+        if funcao_data.model_dump(exclude_unset=True) == {}:
+            raise HTTPException(status_code=400, detail="Pelo menos um campo (nome ou descrição) deve ser fornecido para atualização.")
+
+        success = auth.atualizar_funcao(
+            funcao_id,
+            nome=funcao_data.nome,
+            descricao=funcao_data.descricao
+        )
+        if not success:
+            # Se atualizar_funcao retorna False, pode ser "não encontrado" ou outro motivo não coberto por ValueError
+            # Verificar se a função realmente não existe mais pode ser redundante se auth.atualizar_funcao já lida com isso
+            updated_funcao = auth.obter_funcao(funcao_id)
+            if not updated_funcao:
+                 raise HTTPException(status_code=404, detail=f"Função com ID {funcao_id} não encontrada.")
+            # Se chegou aqui, a atualização falhou por um motivo não de "não encontrado" que não levantou ValueError
+            # Isso pode indicar um problema lógico em auth.atualizar_funcao se não houver conflito de nome
+            # Para agora, vamos assumir que o nome pode ser o problema se não for ValueError
+            raise HTTPException(status_code=409, detail=f"Não foi possível atualizar a função com ID {funcao_id}. Verifique se o novo nome já está em uso.")
+
+
+        updated_funcao = auth.obter_funcao(funcao_id)
+        if not updated_funcao:
+            # Este caso é improvável se success=True, mas é uma salvaguarda
+            raise HTTPException(status_code=404, detail=f"Função com ID {funcao_id} não encontrada após a atualização.")
+        
+        return updated_funcao
+    except ValueError as e: # Captura conflitos de nome ou nome vazio de auth.atualizar_funcao
+        raise HTTPException(status_code=400, detail=str(e)) # Reutiliza 400 para conflito de nome/validação
+    except HTTPException as e: # Re-raise HTTPExceptions para não mascará-las com 500
+        raise e
+    except Exception as e:
+        # Log a exceção 'e' aqui para depuração
+        raise HTTPException(status_code=500, detail=f"Erro interno ao atualizar função: {str(e)}")
+
+@app.delete("/api/funcoes/{funcao_id}", response_model=Dict[str, str])
+async def deletar_funcao_existente(
+    funcao_id: int = Path(..., description="ID da função a ser excluída"),
+    admin: Dict = Depends(get_admin_user)
+):
+    """
+    Exclui uma função existente do sistema.
+    A função não pode ser excluída se estiver atualmente em uso por algum usuário.
+    Requer permissão de administrador.
+    """
+    try:
+        success = auth.excluir_funcao(funcao_id)
+        if not success:
+            # Isso cobre o caso onde obter_funcao(funcao_id) em excluir_funcao retorna None
+            raise HTTPException(status_code=404, detail=f"Função com ID {funcao_id} não encontrada.")
+        
+        return {"mensagem": f"Função {funcao_id} excluída com sucesso"}
+    except ValueError as e: # Captura o erro de função em uso
+        raise HTTPException(status_code=409, detail=str(e)) # 409 Conflict
+    except HTTPException as e: # Re-raise outras HTTPExceptions
+        raise e
+    except Exception as e:
+        # Log a exceção 'e' aqui para depuração
+        raise HTTPException(status_code=500, detail=f"Erro interno ao excluir função: {str(e)}")
 
 # Endpoints de operações com autenticação
 @app.get("/api/operacoes", response_model=List[Operacao])
@@ -396,21 +483,26 @@ async def obter_darfs(usuario: Dict = Depends(get_current_user)):
 
 # Novos endpoints para as funcionalidades adicionais
 
-@app.post("/api/operacoes", response_model=Dict[str, str])
+@app.post("/api/operacoes", response_model=Operacao)
 async def criar_operacao(
     operacao: OperacaoCreate,
     usuario: Dict = Depends(get_current_user)
 ):
     """
-    Cria uma nova operação manualmente.
+    Cria uma nova operação manualmente e retorna a operação criada.
     
     Args:
         operacao: Dados da operação a ser criada.
     """
     try:
-        inserir_operacao_manual(operacao, usuario_id=usuario["id"])
-        return {"mensagem": "Operação criada com sucesso."}
+        new_operacao_id = services.inserir_operacao_manual(operacao, usuario_id=usuario["id"])
+        operacao_criada = services.obter_operacao_service(new_operacao_id, usuario_id=usuario["id"])
+        if not operacao_criada:
+            # This case should ideally not happen if insertion and ID return were successful
+            raise HTTPException(status_code=500, detail="Operação criada mas não pôde ser recuperada.")
+        return operacao_criada
     except Exception as e:
+        # Log the exception e for detailed debugging
         raise HTTPException(status_code=500, detail=f"Erro ao criar operação: {str(e)}")
 
 @app.put("/api/carteira/{ticker}", response_model=Dict[str, str])
@@ -463,70 +555,21 @@ async def obter_resumo_operacoes_fechadas(usuario: Dict = Depends(get_current_us
     - Operações com maior prejuízo
     """
     try:
-        operacoes_fechadas = calcular_operacoes_fechadas(usuario_id=usuario["id"])
-        
-        # Calcula o resumo
-        total_operacoes = len(operacoes_fechadas)
-        lucro_total = sum(op["resultado"] for op in operacoes_fechadas)
-        
-        # Separa day trade e swing trade
-        operacoes_day_trade = [op for op in operacoes_fechadas if op.get("day_trade", False)]
-        operacoes_swing_trade = [op for op in operacoes_fechadas if not op.get("day_trade", False)]
-        
-        lucro_day_trade = sum(op["resultado"] for op in operacoes_day_trade)
-        lucro_swing_trade = sum(op["resultado"] for op in operacoes_swing_trade)
-        
-        # Encontra as operações mais lucrativas e com maior prejuízo
-        operacoes_ordenadas = sorted(operacoes_fechadas, key=lambda x: x["resultado"], reverse=True)
-        operacoes_lucrativas = [op for op in operacoes_ordenadas if op["resultado"] > 0]
-        operacoes_prejuizo = [op for op in operacoes_ordenadas if op["resultado"] < 0]
-        
-        top_lucrativas = operacoes_lucrativas[:5] if operacoes_lucrativas else []
-        top_prejuizo = operacoes_prejuizo[:5] if operacoes_prejuizo else []
-        
-        # Calcula o resumo por ticker
-        resumo_por_ticker = {}
-        for op in operacoes_fechadas:
-            ticker = op["ticker"]
-            if ticker not in resumo_por_ticker:
-                resumo_por_ticker[ticker] = {
-                    "total_operacoes": 0,
-                    "lucro_total": 0,
-                    "operacoes_lucrativas": 0,
-                    "operacoes_prejuizo": 0
-                }
-            
-            resumo_por_ticker[ticker]["total_operacoes"] += 1
-            resumo_por_ticker[ticker]["lucro_total"] += op["resultado"]
-            
-            if op["resultado"] > 0:
-                resumo_por_ticker[ticker]["operacoes_lucrativas"] += 1
-            elif op["resultado"] < 0:
-                resumo_por_ticker[ticker]["operacoes_prejuizo"] += 1
-        
-        return {
-            "total_operacoes": total_operacoes,
-            "lucro_total": lucro_total,
-            "lucro_day_trade": lucro_day_trade,
-            "lucro_swing_trade": lucro_swing_trade,
-            "total_day_trade": len(operacoes_day_trade),
-            "total_swing_trade": len(operacoes_swing_trade),
-            "top_lucrativas": top_lucrativas,
-            "top_prejuizo": top_prejuizo,
-            "resumo_por_ticker": resumo_por_ticker
-        }
+        resumo = services.gerar_resumo_operacoes_fechadas(usuario_id=usuario["id"])
+        return resumo
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro ao calcular resumo de operações fechadas: {str(e)}")
     
-@app.delete("/api/reset", response_model=Dict[str, str])
+@app.delete("/api/admin/reset-financial-data", response_model=Dict[str, str])
 async def resetar_banco(admin: Dict = Depends(get_admin_user)):
     """
-    Remove todos os dados do banco de dados.
+    Remove todos os dados financeiros e operacionais do banco de dados.
     Requer permissão de administrador.
+    Preserva dados de usuários e autenticação.
     """
     try:
         limpar_banco_dados()
-        return {"mensagem": "Banco de dados limpo com sucesso."}
+        return {"mensagem": "Dados financeiros e operacionais foram removidos com sucesso."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro ao limpar banco de dados: {str(e)}")
 

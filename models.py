@@ -51,6 +51,10 @@ class FuncaoResponse(FuncaoBase):
     
     model_config = ConfigDict(from_attributes=True)
 
+class FuncaoUpdate(BaseModel):
+    nome: Optional[str] = None
+    descricao: Optional[str] = None
+
 class OperacaoBase(BaseModel):
     date: date
     ticker: str

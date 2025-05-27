@@ -201,7 +201,7 @@ def inserir_operacao(operacao: Dict[str, Any], usuario_id: Optional[int] = None)
         conn.commit()
         return cursor.lastrowid
 
-def obter_operacao(operacao_id: int, usuario_id: int) -> Optional[Dict[str, Any]]:
+def obter_operacao_por_id(operacao_id: int, usuario_id: int) -> Optional[Dict[str, Any]]:
     """
     Obtém uma operação pelo ID e usuario_id.
     
